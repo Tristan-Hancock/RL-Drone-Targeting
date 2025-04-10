@@ -1,36 +1,74 @@
 # train_ppo.py
+
 import gymnasium as gym
 from stable_baselines3 import PPO
 from stable_baselines3.common.monitor import Monitor
-from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3.common.vec_env import DummyVecEnv
+from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 from DroneNavEnv import DroneNavEnv
+import os
+import time
 
-# Create and wrap the environment to record training metrics
-env = DroneNavEnv()
-env = Monitor(env, filename="training_monitor.csv")
+# Custom callback to print current timestep every 100 calls.
+class PrintTimestepsCallback(BaseCallback):
+    def __init__(self, print_freq=100, verbose=0):
+        super(PrintTimestepsCallback, self).__init__(verbose)
+        self.print_freq = print_freq
 
-# Set up the PPO model with MLP policy and desired hyperparameters
-model = PPO("MlpPolicy", env, verbose=1,
-            learning_rate=3e-4,
-            n_steps=1024,
-            batch_size=64,
-            gamma=0.99,
-            clip_range=0.2,
-            tensorboard_log="./ppo_tensorboard/")
+    def _on_step(self) -> bool:
+        if self.n_calls % self.print_freq == 0:
+            print(f"Training timestep: {self.model.num_timesteps}")
+        return True
 
-# Callback to save the model every 10,000 steps
-checkpoint_callback = CheckpointCallback(save_freq=10000, save_path='./models/', name_prefix='ppo_drone')
+def create_env():
+    env = DroneNavEnv()
+    monitored_env = Monitor(env, filename="./tb_logs/airsim_drone/monitor.csv")
+    vec_env = DummyVecEnv([lambda: monitored_env])
+    return vec_env
 
-# Train the model for a total of 100,000 timesteps
-model.learn(total_timesteps=100000, callback=checkpoint_callback)
+def main():
+    # Create necessary directories.
+    log_dir = "./tb_logs/airsim_drone/"
+    os.makedirs(log_dir, exist_ok=True)
+    checkpoint_dir = "./checkpoints/"
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    
+    # Create the environment.
+    vec_env = create_env()
+    
+    # Set up callbacks: Checkpoint saves every 1000 timesteps,
+    # and PrintTimestepsCallback prints current timestep every 100 steps.
+    checkpoint_callback = CheckpointCallback(
+        save_freq=10, 
+        save_path=checkpoint_dir, 
+        name_prefix="ppo_drone"
+    )
+    print_callback = PrintTimestepsCallback(print_freq=100, verbose=1)
+    
+    # Create PPO model with the MlpPolicy using CPU.
+    model = PPO(
+        "MlpPolicy", 
+        vec_env, 
+        learning_rate=3e-4, 
+        gamma=0.99, 
+        verbose=1, 
+        tensorboard_log=log_dir,
+        device="cpu"
+    )
+    
+    total_timesteps = 2000  # Adjust as needed.
+    
+    print("Starting training...")
+    # Train the model with both callbacks.
+    model.learn(
+        total_timesteps=total_timesteps, 
+        log_interval=10, 
+        callback=[checkpoint_callback, print_callback]
+    )
+    
+    # Save final model.
+    model.save("ppo_drone_nav")
+    print("Training complete. Model saved as 'ppo_drone_nav.zip'.")
 
-# Save the final model
-model.save("ppo_drone_final")
-
-# Optionally, test the trained model
-obs, _ = env.reset()
-terminated, truncated = False, False
-while not (terminated or truncated):
-    action, _ = model.predict(obs)
-    obs, reward, terminated, truncated, info = env.step(action)
-env.close()
+if __name__ == "__main__":
+    main()

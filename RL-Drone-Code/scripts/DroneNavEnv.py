@@ -1,4 +1,3 @@
-# DroneNavEnv.py
 import numpy as np
 import gymnasium as gym
 from gymnasium import spaces
@@ -10,163 +9,182 @@ class DroneNavEnv(gym.Env):
 
     def __init__(self):
         super(DroneNavEnv, self).__init__()
-        # Observation: [dx, dy, dz, vx, vy, vz, yaw, front_distance]
-        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(8,), dtype=np.float32)
-        # Action: [pitch, roll, yaw_rate, throttle] each normalized in [-1, 1]
-        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(4,), dtype=np.float32)
+        # Observation: [dx, dy, dz, vx, vy, vz, yaw]
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(7,), dtype=np.float32)
+        # Discrete Action Space: 7 actions (0: forward, 1: right, 2: backward, 3: left, 4: up, 5: down, 6: hover)
+        self.action_space = spaces.Discrete(7)
 
-        # Connect to AirSim
+        # Connect to AirSim.
         self.client = airsim.MultirotorClient()
-        print("Connected!")
+        print("Connected to AirSim!")
         self.client.confirmConnection()
-        self.client.enableApiControl(True)
-        self.client.armDisarm(True)
+        self.client.enableApiControl(True, vehicle_name="Drone1")
+        self.client.armDisarm(True, vehicle_name="Drone1")
 
-        # Episode settings
-        self.max_steps = 300
+        # Episode parameters.
+        self.max_steps = 500
         self.step_count = 0
+        self.prev_distance = None
+
+        # Fixed starting position (in NED, in meters) – adjust as needed.
+        self.fixed_start = np.array([0.0, 0.0, -10.0], dtype=np.float32)
+        # Retrieve goal from object; if not found, use default.
+        self.fixed_goal = self._get_goal_from_object()
+        print(f"Goal position: {self.fixed_goal}")
+
+        # Step parameters.
+        self.step_length = 5.0  # m/s
+        self.step_duration = 1.0  # seconds
+
+    def _get_goal_from_object(self):
+        """
+        Try to retrieve the goal's pose from an object named 'GoalMarker'.
+        If retrieval fails, use a default fixed goal.
+        """
+        try:
+            pose = self.client.simGetObjectPose("GoalMarker")
+            pos = pose.position
+            if np.any(np.isnan([pos.x_val, pos.y_val, pos.z_val])):
+                raise ValueError("Invalid goal pose")
+            # Convert to Python floats.
+            goal = np.array([float(pos.x_val), float(pos.y_val), float(pos.z_val)], dtype=np.float32)
+            return goal
+        except Exception as e:
+            print("Could not retrieve goal from object 'GoalMarker'; using default fixed goal. Error:", e)
+            return np.array([121.0, -62.4, -14.48], dtype=np.float32)
 
     def reset(self, seed=None, options=None):
+        if not hasattr(self, 'episode_count'):
+            self.episode_count = 0
+        self.episode_count += 1
+        print(f"[RESET] Episode {self.episode_count} starting...")
         print("[RESET] Resetting simulation...")
         self.client.reset()
-        # Extra delay to allow simulator to stabilize
-        time.sleep(3)
+        time.sleep(3)  # Allow simulator to stabilize after reset
+        self.client.enableApiControl(True, vehicle_name="Drone1")
+        self.client.armDisarm(True, vehicle_name="Drone1")
         self.step_count = 0
 
-        # Define safe altitude (NED: negative means above ground)
-        safe_altitude = -10.0
-        
-        # Randomize start and goal positions (x, y between -5 and 5) with fixed safe altitude.
-        self.start_pos = np.array([np.random.uniform(-5, 5), 
-                                    np.random.uniform(-5, 5), 
-                                    safe_altitude])
-        self.goal_pos  = np.array([np.random.uniform(-5, 5), 
-                                    np.random.uniform(-5, 5), 
-                                    safe_altitude])
+        # Set fixed start and goal positions.
+        self.start_pos = self.fixed_start.copy()
+        self.goal_pos = self.fixed_goal.copy()
         print(f"[RESET] Start pos: {self.start_pos}, Goal pos: {self.goal_pos}")
 
-        # Set vehicle pose to the start position.
-        start_pose = airsim.Pose(airsim.Vector3r(*self.start_pos), airsim.to_quaternion(0, 0, 0))
+        # Set the drone's pose to the start position.
+        start_pose = airsim.Pose(
+            airsim.Vector3r(float(self.start_pos[0]), float(self.start_pos[1]), float(self.start_pos[2])),
+            airsim.to_quaternion(0.0, 0.0, 0.0)
+        )
         self.client.simSetVehiclePose(start_pose, True)
         time.sleep(1)
-        self.client.hoverAsync().join()
+        self.client.hoverAsync(vehicle_name="Drone1").join()
 
-        # Attempt takeoff with error handling.
-        try:
-            print("[RESET] Taking off...")
-            self.client.takeoffAsync().join(timeout=10)
-        except Exception as e:
-            print("TakeoffAsync timed out or failed:", e)
+        # Takeoff and ascend.
+        print("[RESET] Taking off...")
+        self.client.takeoffAsync(vehicle_name="Drone1").join()
+        time.sleep(3)
+        target_alt = float(self.start_pos[2])  # Should be -10.0
+        print("[RESET] Ascending to start altitude...")
+        self.client.moveToZAsync(target_alt, 3, vehicle_name="Drone1").join()
+        time.sleep(3)
+        self.client.hoverAsync(vehicle_name="Drone1").join()
+        time.sleep(2)
 
-        try:
-            print("[RESET] Moving to safe altitude...")
-            self.client.moveToZAsync(safe_altitude, 2).join(timeout=10)
-        except Exception as e:
-            print("moveToZAsync timed out or failed:", e)
-            
-        time.sleep(1)  # Additional delay for stabilization
+        self.prev_distance = self._get_distance()
+        return self._get_obs(), {}
 
-        # Get initial state and initialize previous distance for reward shaping.
-        state = self.client.getMultirotorState()
+    def _get_obs(self):
+        """Fetch the drone's state and compute the observation vector."""
+        state = self.client.getMultirotorState(vehicle_name="Drone1")
         pos = state.kinematics_estimated.position
         vel = state.kinematics_estimated.linear_velocity
         yaw = airsim.to_eularian_angles(state.kinematics_estimated.orientation)[2]
-        front_dist = self._get_front_distance()
-        self.prev_dist_to_goal = np.linalg.norm(self.goal_pos - np.array([pos.x_val, pos.y_val, pos.z_val]))
-        obs = np.array([
-            self.goal_pos[0] - pos.x_val,
-            self.goal_pos[1] - pos.y_val,
-            self.goal_pos[2] - pos.z_val,
-            vel.x_val, vel.y_val, vel.z_val,
-            yaw,
-            front_dist
-        ], dtype=np.float32)
-        return obs, {}
+        drone_pos = np.array([float(pos.x_val), float(pos.y_val), float(pos.z_val)], dtype=np.float32)
+        rel_pos = self.goal_pos - drone_pos
+        velocities = np.array([float(vel.x_val), float(vel.y_val), float(vel.z_val)], dtype=np.float32)
+        obs = np.concatenate([rel_pos, velocities, np.array([float(yaw)], dtype=np.float32)])
+        return obs
+
+    def _get_distance(self):
+        """Compute Euclidean distance from the drone to the goal."""
+        obs = self._get_obs()
+        return np.linalg.norm(obs[:3])
 
     def step(self, action):
-        # Unpack and scale the action command:
-        pitch_cmd    = float(action[0]) * 0.2618   # ~15 degrees in radians
-        roll_cmd     = float(action[1]) * 0.2618
-        yaw_rate_cmd = float(action[2]) * 45.0       # degrees per second
-        throttle_cmd = 0.5 + 0.5 * float(action[3])  # scale throttle between 0 and 1
+        """
+        Execute one discrete action step.
+        Action mapping:
+          0: Forward (North)
+          1: Right (East)
+          2: Backward (South)
+          3: Left (West)
+          4: Up (Ascend)
+          5: Down (Descend)
+          6: Hover
+        """
+        vx = vy = vz = 0.0
+        if action == 0:   # Forward: +X in NED
+            vx = self.step_length
+        elif action == 1: # Right: +Y
+            vy = self.step_length
+        elif action == 2: # Backward: -X
+            vx = -self.step_length
+        elif action == 3: # Left: -Y
+            vy = -self.step_length
+        elif action == 4: # Up: Ascend (more negative Z in NED)
+            vz = -self.step_length
+        elif action == 5: # Down: Descend (increase Z)
+            vz = self.step_length
+        elif action == 6: # Hover
+            vx = vy = vz = 0.0
 
-        # Use the API to move the drone.
-        self.client.moveByRollPitchYawrateThrottleAsync(
-            roll_cmd,
-            pitch_cmd,
-            yaw_rate_cmd,
-            throttle_cmd,
-            0.1
-        ).join()
+        # Apply velocity command.
+        self.client.moveByVelocityAsync(vx, vy, vz, duration=self.step_duration, vehicle_name="Drone1").join()
         self.step_count += 1
 
-        # Get updated state.
-        state = self.client.getMultirotorState()
-        pos = state.kinematics_estimated.position
-        vel = state.kinematics_estimated.linear_velocity
-        yaw = airsim.to_eularian_angles(state.kinematics_estimated.orientation)[2]
-        front_dist = self._get_front_distance()
-        obs = np.array([
-            self.goal_pos[0] - pos.x_val,
-            self.goal_pos[1] - pos.y_val,
-            self.goal_pos[2] - pos.z_val,
-            vel.x_val, vel.y_val, vel.z_val,
-            yaw,
-            front_dist
-        ], dtype=np.float32)
+        obs = self._get_obs()
+        current_distance = self._get_distance()
+        reward = 0.0
+        if self.prev_distance is not None:
+            reward = (self.prev_distance - current_distance) * 10.0 - 1.0
+        self.prev_distance = current_distance
 
-        # Compute reward based on progress toward the goal.
-        current_dist = np.linalg.norm(np.array([
-            self.goal_pos[0] - pos.x_val,
-            self.goal_pos[1] - pos.y_val,
-            self.goal_pos[2] - pos.z_val
-        ]))
-        reward = self.prev_dist_to_goal - current_dist  # Positive if closer.
-        self.prev_dist_to_goal = current_dist
-
-        # Check termination conditions.
         terminated = False
+        if current_distance < 2.0:
+            reward += 100.0
+            terminated = True
+
+        collision = self.client.simGetCollisionInfo(vehicle_name="Drone1")
+        if collision.has_collided:
+            reward -= 100.0
+            terminated = True
+
         truncated = False
-        if current_dist < 1.0:
-            reward += 100.0  # Goal reached bonus.
-            terminated = True
-
-        collision_info = self.client.simGetCollisionInfo()
-        if collision_info.has_collided:
-            reward -= 100.0  # Collision penalty.
-            terminated = True
-
-        # Small time penalty.
-        reward -= 0.01
-
         if self.step_count >= self.max_steps:
             truncated = True
 
         return obs, reward, terminated, truncated, {}
 
-    def _get_front_distance(self):
-        """Placeholder for a front sensor reading. Replace with actual sensor data if available."""
-        return 10.0
-
-    def render(self, mode='human'):
-        # Optional: implement camera capture if desired.
+    def render(self, mode="human"):
+        # Optional: add rendering code if desired.
         pass
 
     def close(self):
         print("[CLOSE] Disarming and resetting simulation...")
-        self.client.armDisarm(False)
-        self.client.enableApiControl(False)
+        self.client.armDisarm(False, vehicle_name="Drone1")
+        self.client.enableApiControl(False, vehicle_name="Drone1")
         self.client.reset()
 
-# Quick test:
+
 if __name__ == "__main__":
     env = DroneNavEnv()
     obs, _ = env.reset()
     print("Initial observation:", obs)
-    for _ in range(10):
+    done = False
+    while not done:
         action = env.action_space.sample()
-        obs, reward, terminated, truncated, info = env.step(action)
-        print("Step reward:", reward, "Terminated:", terminated, "Truncated:", truncated)
-        if terminated or truncated:
+        obs, reward, done, truncated, _ = env.step(action)
+        print("Action:", action, "Obs:", obs, "Reward:", reward, "Done:", done)
+        if done or truncated:
             break
     env.close()
