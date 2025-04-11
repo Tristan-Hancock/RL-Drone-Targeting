@@ -7,7 +7,11 @@ venv/*
 RL-Drone-Code/*
 TrainEnv/*
 PPO/*
-3Drone/*
 Drone/*
 2Drone/*
 .png
+3Drone/models/*
+3Drone/__pycache__/*
+3Drone/tb_logs/*
+3Drone/png/*
+3Drone/Assets/*
