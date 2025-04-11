@@ -21,7 +21,7 @@ def make_env(render_mode=None, num_buildings=10):
         return env
     return _init
 
-def train_agent(total_timesteps=100000, log_interval=10, save_freq=10000):
+def train_agent(total_timesteps=200000, log_interval=10, save_freq=10000):
     """
     Train a PPO agent to navigate the drone through buildings to its base camp.
     """
@@ -67,7 +67,7 @@ def train_agent(total_timesteps=100000, log_interval=10, save_freq=10000):
         gamma=0.99,
         gae_lambda=0.95,
         clip_range=0.2,
-        ent_coef=0.01,  # Encourage exploration
+        ent_coef=0.03,  # Encourage exploration
         policy_kwargs=dict(
             net_arch=[dict(pi=[128, 128], vf=[128, 128])]
         )
@@ -95,7 +95,7 @@ def train_agent(total_timesteps=100000, log_interval=10, save_freq=10000):
     print("Training complete and model saved.")
     return model
 
-def evaluate_agent(model_path="./models/ppo_drone3d.zip", episodes=5):
+def evaluate_agent(model_path="./models/ppo_drone3d.zip", episodes=10):
     """
     Evaluate a trained agent with rendering enabled.
     """

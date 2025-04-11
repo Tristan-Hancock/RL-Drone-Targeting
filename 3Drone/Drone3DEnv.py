@@ -86,7 +86,7 @@ class Drone3DEnv(gym.Env):
         )
 
         # Sky background.
-        self.sky = Sky(texture="Assets/grass.jpeg", color=color.clear)
+        self.sky = Sky(texture="Assets/skyblue.jpg")
 
         # Drone entity with a quad textured by drone.png.
         self.drone_entity = Entity(
@@ -103,7 +103,7 @@ class Drone3DEnv(gym.Env):
         # Goal flag entity using a quad textured by goal_flag.png.
         self.goal_entity = Entity(
             model='quad',
-            texture='Assets/goal.png',
+            texture='Assets/goal2.png',
             scale=4.0,
             position=Vec3(*self.goal_position),
             billboard=True,
